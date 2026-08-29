@@ -172,7 +172,7 @@ impl Drop for Encoder
 
 // A new encoder at `quality`, `window` and `mode`.
 encoder(quality: int = DEFAULT_QUALITY, window: int = DEFAULT_WINDOW,
-        mode: Mode = Mode.Generic) -> Result[Encoder, Error]
+        mode: Mode = Mode.Generic) -> Result[&Encoder, Error]
     if quality < MIN_QUALITY || quality > MAX_QUALITY then return Err(OutOfRange)
     if window < MIN_WINDOW || window > MAX_WINDOW then return Err(OutOfRange)
 
@@ -290,7 +290,7 @@ impl Drop for Decoder
     drop(self) = c.decoder_destroy(self.state)
 
 // A new decoder.
-decoder() -> Result[Decoder, Error]
+decoder() -> Result[&Decoder, Error]
     val state = c.decoder_create(null, null, null)
 
     if usize(state) == 0 then return Err(NoMemory)

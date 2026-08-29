@@ -7,7 +7,7 @@ once and serves many times.
 
 ```
 dependencies {
-  brotli { git = "github.com/sysl-lang/brotli", version = "0.1.0" }
+  brotli { git = "github.com/sysl-lang/brotli", version = "0.1.1" }
 }
 ```
 
@@ -149,3 +149,26 @@ Shared and prepared dictionaries — brotli lets both ends agree on a corpus ahe
 worth a great deal for many small similar responses and is a second API. The decoder's metadata
 callbacks. `BROTLI_OPERATION_FLUSH`, which matters for a long-lived stream that must be readable
 before it ends. None of these has been asked for.
+
+## Checking the handles are released
+
+A `BrotliEncoderState` is about half a megabyte, and nothing in a suite notices one being leaked --
+the compression is still correct. What notices is the resident set over a loop:
+
+```sysl
+for i in 0..<50000
+    val out = compress("hello, this is a payload worth compressing a little".bytes)?
+```
+
+```
+/usr/bin/time -l ./probe
+```
+
+**4.8 MB, against 3.3 MB for the same program at a thousand iterations.** Before `encoder` and `decoder`
+returned `&Encoder` and `&Decoder` it reached **26 GB**, which is the same program leaking one state
+per call.
+
+That is why the constructors hand back a box. A destructor runs when a box's strong count reaches
+zero and for nothing else, so a `Drop` on a type nobody boxes is never called -- and a type
+annotation at the call site does not fix it, because reading a value into a `&Encoder` binding boxes
+a *copy*.

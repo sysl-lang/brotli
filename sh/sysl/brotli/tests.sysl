@@ -466,3 +466,30 @@ end a_full_destination_is_not_an_error
 versions_are_real()
     assert(encoder_version() >= 0x1000000)
     assert(decoder_version() >= 0x1000000)
+
+// Both handles work through the box the constructors now return them in.
+//
+// **What this does NOT prove is that the destructors run**, and it is worth saying so out loud. A
+// `Drop` fires when a *box's* count reaches zero and for nothing else, so a constructor handing back
+// a plain value leaks its state and the suite stays green — the bytes are still right. A type
+// annotation does not pin it either: reading a value into a `&Encoder` binding boxes a copy, so
+// `val e: &Encoder = encoder()?` compiles whichever way the constructor is declared. Checked, rather
+// than assumed.
+//
+// **The check that does see it is a measurement**, and `README.md § Checking the handles are
+// released` has the command: fifty thousand `compress` calls held at 18 MB after the fix and reached
+// 26 GB before it.
+@test("both handles work through the box their constructors return")
+the_handles_are_boxed()
+    var e: &Encoder = encoder().unwrap()
+    var d: &Decoder = decoder().unwrap()
+
+    var out: [64]u8 = [0; 64]
+
+    val put = e.push("boxed".bytes, out[..], true).unwrap()
+
+    assert_eq(put.done, true, "the encoder still works through the box")
+
+    val got = d.push(out[0..<put.produced], out[..], false).unwrap()
+
+    assert_eq(got.produced, 5, "and so does the decoder")

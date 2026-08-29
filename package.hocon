@@ -3,11 +3,11 @@
 // This is the block a consumer writes to reach this package:
 //
 //     dependencies {
-//       brotli { git = "github.com/sysl-lang/brotli", version = "0.1.0" }
+//       brotli { git = "github.com/sysl-lang/brotli", version = "0.1.1" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
-// tag `v0.1.0` on this repository.
+// tag `v0.1.1` on this repository.
 //
 // **Brotli has to be installed, and so do its headers.** Nothing is vendored: brotli is a C project
 // with its own build system and a 120 KB static dictionary, and every platform ships it.
@@ -21,7 +21,7 @@
 
 package {
   name    = "brotli"
-  version = "0.1.0"
+  version = "0.1.1"
 
   // The compiler this was written against and the only one it is known to build with. Lower it when
   // somebody builds this with an older one — a floor is meant to be a fact rather than a guess.
