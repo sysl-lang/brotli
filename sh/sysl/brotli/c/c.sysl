@@ -1,0 +1,122 @@
+// Brotli as C declares it: the two streaming state machines, their parameters, and the numbers its
+// headers hold.
+//
+// **Nothing is vendored.** Brotli is three system libraries — `libbrotlienc`, `libbrotlidec` and the
+// `libbrotlicommon` they share — installed as one package everywhere, and `package.hocon` asks
+// `pkg-config` where they are. So there is no `defines` block and no build option to get wrong: the
+// objects are the platform's.
+//
+// Nothing here is meant to be called by a program. A state is a pointer the library allocated, a
+// failure is a zero, and both cursors move through pointers to pointers. The module above turns
+// those into `Encoder`, `Decoder` and a `Result`.
+
+module sh.sysl.brotli.c
+
+@include("brotli/encode.h")
+@include("brotli/decode.h")
+
+// ## The two states
+//
+// **Opaque because the library allocates them**, which is the thing that separates this binding from
+// `miniz`'s: there is no size to ask for and no slice to place them in. `create` mallocs, `destroy`
+// frees, and the module above puts that pair behind `Drop`.
+opaque struct EncoderState
+opaque struct DecoderState
+
+// ## Encoding
+//
+// The allocator triple is `(alloc, free, opaque)` and this binding passes null for all three, which
+// selects `malloc` and `free`. It is bound as `*u8` rather than as a function pointer because
+// nothing here supplies one — see the module above for why redirecting it is not the answer it
+// looks like.
+extern "BrotliEncoderCreateInstance" encoder_create(alloc: *u8, free: *u8, opaque: *u8) -> *EncoderState
+
+extern "BrotliEncoderDestroyInstance" encoder_destroy(state: *EncoderState)
+
+extern "BrotliEncoderSetParameter" encoder_set_parameter(state: *EncoderState, param: int,
+                                                         value: u32) -> int
+
+// The one call that moves an encode along. `available_in`/`next_in` and `available_out`/`next_out`
+// are cursors the library advances, so both are read back after every call.
+extern "BrotliEncoderCompressStream" encoder_compress_stream(state: *EncoderState, op: int,
+                                                             available_in: *usize, next_in: **u8,
+                                                             available_out: *usize, next_out: **u8,
+                                                             total_out: *usize) -> int
+
+extern "BrotliEncoderIsFinished" encoder_is_finished(state: *EncoderState) -> int
+
+extern "BrotliEncoderHasMoreOutput" encoder_has_more_output(state: *EncoderState) -> int
+
+// Hands back the library's **own** buffer and the count in it, valid until the next call on the
+// state. Asking for output this way rather than through `next_out` is what lets a caller compress
+// without having sized anything, which is the whole of `compress` above.
+extern "BrotliEncoderTakeOutput" encoder_take_output(state: *EncoderState, size: *usize) -> *u8
+
+// The largest a compressed stream can be for an input of this many bytes.
+extern "BrotliEncoderMaxCompressedSize" encoder_max_compressed_size(input_size: usize) -> usize
+
+extern "BrotliEncoderVersion" encoder_version() -> u32
+
+// ## Decoding
+
+extern "BrotliDecoderCreateInstance" decoder_create(alloc: *u8, free: *u8, opaque: *u8) -> *DecoderState
+
+extern "BrotliDecoderDestroyInstance" decoder_destroy(state: *DecoderState)
+
+extern "BrotliDecoderSetParameter" decoder_set_parameter(state: *DecoderState, param: int,
+                                                         value: u32) -> int
+
+// Answers a `DECODER_RESULT_*` rather than a boolean, which is the decoder's whole error surface:
+// the three non-error answers say what it is waiting for.
+extern "BrotliDecoderDecompressStream" decoder_decompress_stream(state: *DecoderState,
+                                                                 available_in: *usize, next_in: **u8,
+                                                                 available_out: *usize, next_out: **u8,
+                                                                 total_out: *usize) -> int
+
+extern "BrotliDecoderHasMoreOutput" decoder_has_more_output(state: *DecoderState) -> int
+
+extern "BrotliDecoderTakeOutput" decoder_take_output(state: *DecoderState, size: *usize) -> *u8
+
+extern "BrotliDecoderIsFinished" decoder_is_finished(state: *DecoderState) -> int
+
+extern "BrotliDecoderGetErrorCode" decoder_get_error_code(state: *DecoderState) -> int
+
+// Brotli's own sentence for an error code, as a static C string the caller does not own.
+extern "BrotliDecoderErrorString" decoder_error_string(code: int) -> *u8
+
+extern "BrotliDecoderVersion" decoder_version() -> u32
+
+// ## The numbers, asked for rather than transcribed
+//
+// **Every one of these is an `enum` constant rather than a `#define`**, apart from the four ranges,
+// which is worth saying because a `c const` block reading an enumeration is the less-travelled half
+// of the mechanism — qrcodegen is the other package here that needs it.
+c const
+    OPERATION_PROCESS: int = "BROTLI_OPERATION_PROCESS"
+    OPERATION_FLUSH:   int = "BROTLI_OPERATION_FLUSH"
+    OPERATION_FINISH:  int = "BROTLI_OPERATION_FINISH"
+
+c const
+    PARAM_MODE:      int = "BROTLI_PARAM_MODE"
+    PARAM_QUALITY:   int = "BROTLI_PARAM_QUALITY"
+    PARAM_LGWIN:     int = "BROTLI_PARAM_LGWIN"
+    PARAM_SIZE_HINT: int = "BROTLI_PARAM_SIZE_HINT"
+
+    MODE_GENERIC: u32 = "BROTLI_MODE_GENERIC"
+    MODE_TEXT:    u32 = "BROTLI_MODE_TEXT"
+    MODE_FONT:    u32 = "BROTLI_MODE_FONT"
+
+c const
+    DECODER_RESULT_ERROR:             int = "BROTLI_DECODER_RESULT_ERROR"
+    DECODER_RESULT_SUCCESS:           int = "BROTLI_DECODER_RESULT_SUCCESS"
+    DECODER_RESULT_NEEDS_MORE_INPUT:  int = "BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT"
+    DECODER_RESULT_NEEDS_MORE_OUTPUT: int = "BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT"
+
+// The bounds the header states for the two levers a caller is likely to move.
+c const
+    MIN_QUALITY:     int = "BROTLI_MIN_QUALITY"
+    MAX_QUALITY:     int = "BROTLI_MAX_QUALITY"
+    DEFAULT_QUALITY: int = "BROTLI_DEFAULT_QUALITY"
+    MIN_WINDOW_BITS: int = "BROTLI_MIN_WINDOW_BITS"
+    MAX_WINDOW_BITS: int = "BROTLI_MAX_WINDOW_BITS"
+    DEFAULT_WINDOW:  int = "BROTLI_DEFAULT_WINDOW"

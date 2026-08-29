@@ -1,0 +1,468 @@
+// What this package claims, checked where possible against somebody else's brotli.
+//
+// **The fixtures below were produced by the Rust `brotli` crate**, which is a from-scratch port
+// rather than a binding of the C library this package calls — so a stream in this file agreeing with
+// the plaintext beside it says the *format* was read, not that one library agrees with itself. Each
+// was additionally offered to the `brotli` command line before being written down, and both accepted
+// it; where those two had disagreed the right move would have been a third encoder, per the lesson
+// qrcodegen's suite carries.
+//
+// **The encode direction cannot be pinned the same way in a unit test**, because a compressed stream
+// is a *choice* rather than an answer and every encoder makes a different one — the Rust crate and
+// the C library produce different bytes for the same input at the same quality, and both are
+// correct. What stands in for it is that `libbrotlienc` and `libbrotlidec` are two separate
+// libraries: a round trip here is one of them checking the other, not code checking itself. Our
+// output was also handed to the Rust decoder and to the command line outside the suite; the README
+// records that.
+
+module sh.sysl.brotli
+@tests
+
+import sysl.harness.*
+import sysl.buf.{Buf, buf}
+
+// -- Fixtures from an independent implementation ---------------------------------------------------
+
+private short_plain() -> []const u8 = [
+    104, 101, 108, 108, 111, 44, 32, 98, 114, 111, 116, 108, 105
+]
+
+// Produced by the Rust `brotli` crate at quality 5 — 17 bytes.
+private short_br() -> []const u8 = [
+    11, 6, 128, 104, 101, 108, 108, 111, 44, 32, 98, 114, 111, 116, 108, 105, 3
+]
+
+private html_plain() -> []const u8 = [
+    60, 33, 68, 79, 67, 84, 89, 80, 69, 32, 104, 116, 109, 108, 62, 60, 104, 116, 109, 108, 32, 108,
+    97, 110, 103, 61, 34, 101, 110, 34, 62, 60, 104, 101, 97, 100, 62, 60, 109, 101, 116, 97, 32, 99,
+    104, 97, 114, 115, 101, 116, 61, 34, 117, 116, 102, 45, 56, 34, 62, 60, 116, 105, 116, 108, 101,
+    62, 97, 60, 47, 116, 105, 116, 108, 101, 62, 60, 47, 104, 101, 97, 100, 62, 60, 98, 111, 100, 121,
+    62, 60, 47, 98, 111, 100, 121, 62, 60, 47, 104, 116, 109, 108, 62
+]
+
+// Produced by the Rust `brotli` crate at quality 11 — 40 bytes.
+private html_br() -> []const u8 = [
+    27, 101, 0, 64, 165, 125, 120, 94, 194, 130, 67, 78, 128, 14, 150, 65, 219, 165, 5, 30, 178, 80,
+    148, 228, 108, 42, 13, 92, 175, 5, 204, 68, 73, 48, 200, 155, 54, 226, 81, 18
+]
+
+private repeat_plain() -> []const u8 = [
+    116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106,
+    117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111,
+    103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111,
+    120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121,
+    32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110,
+    32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108,
+    97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114,
+    111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116,
+    104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99,
+    107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101,
+    114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113,
+    117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32,
+    111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104,
+    101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109,
+    112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46,
+    32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32,
+    106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100,
+    111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102,
+    111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122,
+    121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119,
+    110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32,
+    108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98,
+    114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32,
+    116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105,
+    99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118,
+    101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32,
+    113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115,
+    32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116,
+    104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117,
+    109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103,
+    46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120,
+    32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32,
+    100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32,
+    102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97,
+    122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111,
+    119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104,
+    101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107,
+    32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114,
+    32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117,
+    105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111,
+    118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101,
+    32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112,
+    115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32,
+    116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106,
+    117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111,
+    103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111,
+    120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121,
+    32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110,
+    32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108,
+    97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114,
+    111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116,
+    104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99,
+    107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101,
+    114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113,
+    117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32,
+    111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104,
+    101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109,
+    112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46,
+    32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32,
+    106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100,
+    111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102,
+    111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122,
+    121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119,
+    110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32,
+    108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98,
+    114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32,
+    116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105,
+    99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118,
+    101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32,
+    113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115,
+    32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116,
+    104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117,
+    109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103,
+    46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120,
+    32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32,
+    100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32,
+    102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97,
+    122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107, 32, 98, 114, 111,
+    119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114, 32, 116, 104,
+    101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117, 105, 99, 107,
+    32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111, 118, 101, 114,
+    32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101, 32, 113, 117,
+    105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112, 115, 32, 111,
+    118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32, 116, 104, 101,
+    32, 113, 117, 105, 99, 107, 32, 98, 114, 111, 119, 110, 32, 102, 111, 120, 32, 106, 117, 109, 112,
+    115, 32, 111, 118, 101, 114, 32, 116, 104, 101, 32, 108, 97, 122, 121, 32, 100, 111, 103, 46, 32
+]
+
+// Produced by the Rust `brotli` crate at quality 9 — 49 bytes.
+private repeat_br() -> []const u8 = [
+    27, 7, 7, 0, 68, 243, 164, 105, 237, 48, 25, 119, 226, 16, 121, 42, 199, 159, 163, 72, 100, 96, 90,
+    87, 102, 38, 193, 51, 194, 41, 79, 67, 224, 69, 94, 181, 15, 112, 139, 130, 76, 165, 197, 254, 7,
+    207, 104, 16, 0
+]
+
+private empty_plain() -> []const u8 = []
+
+// Produced by the Rust `brotli` crate at quality 11 — 1 bytes.
+private empty_br() -> []const u8 = [
+    59
+]
+
+private random_plain() -> []const u8 = [
+    31, 198, 109, 20, 187, 98, 9, 176, 87, 254, 165, 76, 243, 154, 65, 232, 143, 54, 221, 132, 43, 210,
+    121, 32, 199, 110, 21, 188, 99, 10, 177, 88, 255, 166, 77, 244, 155, 66, 233, 144, 55, 222, 133,
+    44, 211, 122, 33, 200, 111, 22, 189, 100, 11, 178, 89, 0, 167, 78, 245, 156, 67, 234, 145, 56
+]
+
+// Produced by the Rust `brotli` crate at quality 11 — 68 bytes.
+private random_br() -> []const u8 = [
+    139, 31, 128, 31, 198, 109, 20, 187, 98, 9, 176, 87, 254, 165, 76, 243, 154, 65, 232, 143, 54, 221,
+    132, 43, 210, 121, 32, 199, 110, 21, 188, 99, 10, 177, 88, 255, 166, 77, 244, 155, 66, 233, 144,
+    55, 222, 133, 44, 211, 122, 33, 200, 111, 22, 189, 100, 11, 178, 89, 0, 167, 78, 245, 156, 67, 234,
+    145, 56, 3
+]
+
+// `Buf.view()` answers a `[]byte` and a fixture is a `[]const byte`; the two are different types and
+// deliberately so, and a parameter is where they meet.
+private same(got: []const u8, want: []const u8, what: string = "bytes differ") =
+    assert_eq(got, want, what)
+
+// -- Reading somebody else's streams ----------------------------------------------------------------
+
+@test("a stream from a different brotli implementation decodes to the right bytes")
+foreign_streams_decode()
+    same(decompress(short_br(), 1 << 16).unwrap().view(), short_plain())
+    same(decompress(html_br(), 1 << 16).unwrap().view(), html_plain())
+    same(decompress(repeat_br(), 1 << 16).unwrap().view(), repeat_plain())
+    same(decompress(random_br(), 1 << 16).unwrap().view(), random_plain())
+
+// The empty stream is one byte and is not nothing — a decoder that treated an empty answer as a
+// failure would pass every other test in this file.
+@test("an empty stream decodes to no bytes at all, and is not an error")
+the_empty_stream_is_a_stream()
+    val out = decompress(empty_br(), 1 << 16).unwrap()
+
+    assert_eq(out.len(), 0)
+    assert_eq(empty_br().len, 1)
+
+// **Brotli's static dictionary is the thing that makes brotli brotli**: 120 KB of common web text
+// compiled into both ends, so short HTML compresses far below what its own entropy allows. If this
+// package linked a build without it, this is the test that would notice.
+@test("the static dictionary is present — short html goes well below its own entropy")
+the_static_dictionary_is_linked()
+    val out = compress(html_plain(), 11).unwrap()
+
+    assert(out.len() < html_plain().len / 2,
+        "102 bytes of html should compress past 2:1; without the static dictionary it cannot")
+
+    same(decompress(out.view(), 1 << 16).unwrap().view(), html_plain())
+end the_static_dictionary_is_linked
+
+// -- Round trips ------------------------------------------------------------------------------------
+
+// Not one test but twelve: the qualities are twelve different encoders sharing an output format, and
+// only 0 through 3 take a different code path from 4 through 9 and from 10 and 11.
+@test("every quality from 0 to 11 round-trips")
+every_quality_round_trips()
+    for q in MIN_QUALITY..MAX_QUALITY
+        val out = compress(repeat_plain(), q).unwrap()
+
+        same(decompress(out.view(), 1 << 20).unwrap().view(), repeat_plain(),
+            "quality did not survive a round trip")
+end every_quality_round_trips
+
+@test("a higher quality is not larger than a lower one on compressible input")
+quality_buys_something()
+    val fast = compress(repeat_plain(), 1).unwrap()
+    val slow = compress(repeat_plain(), 11).unwrap()
+
+    assert(slow.len() < fast.len(),
+        "quality 11 should beat quality 1 on 1800 bytes of repeating text")
+end quality_buys_something
+
+// Every window from the smallest brotli accepts to the largest, since the window is written into the
+// stream header and a decoder reads it back — a binding that passed the wrong parameter index would
+// produce streams that decode and are the wrong size, which only this notices.
+@test("every window size round-trips, and a small one costs something")
+every_window_round_trips()
+    var previous: usize = 0
+
+    for w in MIN_WINDOW..MAX_WINDOW
+        val out = compress(repeat_plain(), 11, w).unwrap()
+
+        same(decompress(out.view(), 1 << 20).unwrap().view(), repeat_plain())
+
+        previous = out.len()
+
+    assert(previous > 0)
+end every_window_round_trips
+
+@test("each mode round-trips, and text mode is not generic mode")
+modes_round_trip()
+    for m in [Mode.Generic, Mode.Text, Mode.Font]
+        val out = compress(html_plain(), 11, DEFAULT_WINDOW, m).unwrap()
+
+        same(decompress(out.view(), 1 << 16).unwrap().view(), html_plain())
+
+// Incompressible input is the case a caller sizing a buffer to the input gets wrong, so it is worth
+// its own test: the answer is *larger* than what went in.
+@test("incompressible input comes out larger, and still round-trips")
+incompressible_input_grows()
+    val out = compress(random_plain(), 11).unwrap()
+
+    assert(out.len() > random_plain().len,
+        "64 bytes of noise cannot compress; brotli has to frame it")
+
+    same(decompress(out.view(), 1 << 16).unwrap().view(), random_plain())
+end incompressible_input_grows
+
+@test("compressing nothing gives a stream, and it decodes to nothing")
+empty_input_round_trips()
+    val out = compress([]).unwrap()
+
+    assert(out.len() > 0, "even an empty stream has a header")
+    assert_eq(decompress(out.view(), 16).unwrap().len(), 0)
+
+// -- The limit, which is the reason `decompress` has an argument nothing else needs ------------------
+
+@test("a limit smaller than the answer refuses, and names the limit it was given")
+the_limit_refuses()
+    decompress(repeat_br(), 100) match
+        Err(TooLarge(n)) -> assert_eq(n, 100)
+        Err(e) -> assert(false, "wanted TooLarge, got another error")
+        Ok(out) -> assert(false, "1800 bytes came back under a 100-byte limit")
+
+// **The refusal must happen before the memory is spent, not after.** 1800 bytes under a 1-byte limit
+// is a small case of the attack; what makes it a test rather than a formality is that a limit checked
+// only at the end would pass it.
+@test("the limit is checked as output arrives, not once it is all there")
+the_limit_is_not_an_afterthought()
+    assert(decompress(repeat_br(), 1).is_err())
+    assert(decompress(repeat_br(), repeat_plain().len - 1).is_err())
+    assert(decompress(repeat_br(), repeat_plain().len).is_ok(),
+        "a limit exactly the size of the answer must be enough")
+
+// -- Refusing what is not a stream ------------------------------------------------------------------
+
+@test("a corrupted stream is refused, and brotli's own sentence comes back with the code")
+a_flipped_bit_is_corrupt()
+    // **A valid stream with one byte flipped**, rather than invented noise — which is the difference
+    // between exercising the decoder's error path and exercising its very first check. Noise, it
+    // turns out, mostly reads as *short*: brotli sees a plausible header and waits for more.
+    var broken: [49]u8 = [0; 49]
+
+    for i in 0..<repeat_br().len do broken[i] = repeat_br()[i]
+
+    broken[0] = broken[0] ^ 255
+
+    decompress(broken[..], 1 << 20) match
+        Err(Corrupt(code, why)) ->
+            assert(code < 0, "brotli's error codes are negative")
+            assert(why.len > 0, "the sentence brotli prints should reach the caller")
+        Err(Truncated) -> assert(false, "this is corrupt rather than short")
+        Err(e) -> assert(false, "wanted Corrupt")
+        Ok(out) -> assert(false, "a corrupted stream decompressed")
+end a_flipped_bit_is_corrupt
+
+// A stream cut in half is a different failure from a stream that is wrong, and a caller acts
+// differently on each: one is worth waiting for more bytes, the other is not.
+@test("a truncated stream is Truncated, not Corrupt")
+half_a_stream_is_truncated()
+    val whole = repeat_br()
+
+    decompress(whole[0..<whole.len / 2], 1 << 20) match
+        Err(Truncated) -> ()
+        Err(Corrupt(c, w)) -> assert(false, "half a valid stream should read as short, not as corrupt")
+        Err(e) -> assert(false, "wanted Truncated")
+        Ok(out) -> assert(false, "half a stream decompressed")
+end half_a_stream_is_truncated
+
+@test("an empty input is short rather than an empty answer")
+no_input_is_truncated()
+    assert(decompress([], 1 << 16).is_err(),
+        "no bytes at all is not the same as the one-byte empty stream")
+
+// -- Parameters out of range ------------------------------------------------------------------------
+
+@test("a quality or window outside what brotli accepts is refused before anything is allocated")
+out_of_range_is_refused()
+    assert(compress([104], MAX_QUALITY + 1).is_err())
+    assert(compress([104], MIN_QUALITY - 1).is_err())
+    assert(compress([104], 11, MAX_WINDOW + 1).is_err())
+    assert(compress([104], 11, MIN_WINDOW - 1).is_err())
+
+    assert(compress([104], MAX_QUALITY).is_ok())
+    assert(compress([104], MIN_QUALITY).is_ok())
+    assert(compress([104], 11, MAX_WINDOW).is_ok())
+    assert(compress([104], 11, MIN_WINDOW).is_ok())
+end out_of_range_is_refused
+
+// -- Into a caller's slice --------------------------------------------------------------------------
+
+@test("the bound is a ceiling, and a slice that size always fits")
+bound_is_enough()
+    assert(bound(0) > 0)
+    assert(bound(1800) > 1800)
+
+    var dst: [4096]u8 = [0; 4096]
+
+    val n = compress_into(repeat_plain(), dst[0..<bound(repeat_plain().len)]).unwrap()
+
+    same(decompress(dst[0..<n], 1 << 20).unwrap().view(), repeat_plain())
+end bound_is_enough
+
+// **`Short` carries the exact figure, not the bound** — which is the one thing this package can say
+// that `miniz` cannot, because brotli has already done the work into its own buffer by the time the
+// shortfall is known.
+@test("a slice one byte short reports the exact size wanted, not the ceiling")
+short_reports_the_exact_size()
+    val whole = compress(repeat_plain(), 11).unwrap()
+
+    var dst: [4096]u8 = [0; 4096]
+
+    compress_into(repeat_plain(), dst[0..<whole.len() - 1], 11) match
+        Err(Short(needed)) ->
+            assert_eq(needed, whole.len())
+            assert(needed < bound(repeat_plain().len),
+                "the exact figure must be under the ceiling, or it is the ceiling")
+        Err(e) -> assert(false, "wanted Short")
+        Ok(n) -> assert(false, "it fit in one byte less than it takes")
+
+    assert_eq(compress_into(repeat_plain(), dst[0..<whole.len()], 11).unwrap(), whole.len())
+end short_reports_the_exact_size
+
+@test("decompressing into a slice fills it, and a short one says how much was wanted")
+decompress_into_a_slice()
+    var dst: [2048]u8 = [0; 2048]
+
+    val n = decompress_into(repeat_br(), dst[..]).unwrap()
+
+    assert_eq(n, repeat_plain().len)
+    same(dst[0..<n], repeat_plain())
+
+    decompress_into(repeat_br(), dst[0..<100]) match
+        Err(Short(needed)) -> assert_eq(needed, repeat_plain().len)
+        Err(e) -> assert(false, "wanted Short")
+        Ok(m) -> assert(false, "1800 bytes fit in 100")
+end decompress_into_a_slice
+
+// -- Streaming, chunk by chunk ----------------------------------------------------------------------
+
+// The shape a response being written as it is generated uses, and deliberately `miniz`'s: the same
+// `push(src, dst, finish)` answering the same `Progress`.
+@test("an encoder fed one chunk at a time produces a stream a decoder reads whole")
+streaming_both_ways()
+    var e = encoder(9).unwrap()
+
+    var dst: [4096]u8 = [0; 4096]
+
+    val src = repeat_plain()
+    var at: usize = 0
+
+    while at < src.len
+        val end = if at + 300 > src.len then src.len else at + 300
+
+        e.push(src[at..<end], dst[..], end == src.len).unwrap()
+
+        at = end
+
+    val out = dst[0..<e.written]
+
+    same(decompress(out, 1 << 20).unwrap().view(), repeat_plain())
+
+    var d = decoder().unwrap()
+    var back: [2048]u8 = [0; 2048]
+
+    val step = d.push(out, back[..], false).unwrap()
+
+    assert(step.done, "the whole stream was offered, so the decoder should have finished")
+    assert_eq(d.written, repeat_plain().len)
+    same(back[0..<d.written], repeat_plain())
+end streaming_both_ways
+
+// An encoder is entitled to hold everything back until it is told to finish, and a caller that
+// treated a zero-byte step as an error would break on the first chunk. This pins that it is allowed.
+@test("an encoder may produce nothing at all until it is finished")
+an_encoder_may_hold_everything_back()
+    var e = encoder(11).unwrap()
+
+    var dst: [4096]u8 = [0; 4096]
+
+    val first = e.push(repeat_plain()[0..<400], dst[..], false).unwrap()
+
+    assert_eq(first.consumed, 400)
+    assert(!first.done)
+
+    val last = e.push(repeat_plain()[400..], dst[..], true).unwrap()
+
+    assert(last.done)
+    assert(e.written > 0)
+
+    same(decompress(dst[0..<e.written], 1 << 20).unwrap().view(), repeat_plain())
+end an_encoder_may_hold_everything_back
+
+// A decoder given a destination that fills stops short and says how far it got, rather than failing.
+// That is the case a caller draining into a file is in on every chunk but the last.
+@test("a decoder whose destination fills reports progress rather than an error")
+a_full_destination_is_not_an_error()
+    var d = decoder().unwrap()
+
+    var small: [64]u8 = [0; 64]
+
+    val step = d.push(repeat_br(), small[..], true).unwrap()
+
+    assert(!step.done, "1800 bytes cannot have fitted in 64")
+    assert_eq(step.produced, 64)
+    same(small[..], repeat_plain()[0..<64])
+end a_full_destination_is_not_an_error
+
+// -- What is linked ---------------------------------------------------------------------------------
+
+// Both halves are separate shared libraries and can be different builds; a mismatch is worth being
+// able to print. 1.0.0 is `0x1000000`, so anything at or above it is a real answer rather than a
+// stub.
+@test("both libraries report a version, and it is at least 1.0.0")
+versions_are_real()
+    assert(encoder_version() >= 0x1000000)
+    assert(decoder_version() >= 0x1000000)

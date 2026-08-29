@@ -1,0 +1,376 @@
+// Brotli for sysl — the encoding a browser asks for first, at both ends.
+//
+// **`Accept-Encoding: br, gzip` is what every browser sends**, and `br` is what it prefers: on text
+// it is worth roughly a sixth over gzip at the same speed class, and rather more at the high quality
+// settings a server can afford for a file it compresses once. `sh.sysl.miniz` is the package for
+// gzip and deflate; this is the one for the header browsers put first.
+//
+// ## Two shapes, and which to reach for
+//
+// **`compress` and `decompress` own their answers**, so nothing has to be sized:
+//
+//     val small = compress(page)?              // a Buf[u8]
+//     val back  = decompress(small, 1 << 20)?  // a limit, always
+//
+// **`Encoder` and `Decoder` take a chunk at a time into a slice the caller owns**, which is what a
+// response being written as it is generated wants, and is deliberately the same shape `miniz`'s
+// `Deflater` and `Inflater` have — so a program choosing an encoding at run time writes the two
+// branches the same way.
+//
+// ## The limit on `decompress` is not optional, and that is the point
+//
+// **A compressed stream says nothing about how large it becomes**, and brotli's ratio on adversarial
+// input is enormous — a few hundred bytes expand to gigabytes. A server decompressing a request body
+// it did not create must bound it, and a bound that is easy to forget is one that gets forgotten. So
+// there is no unbounded form: `decompress` takes the limit as an argument, and `decompress_into` is
+// bounded by the slice it is given.
+//
+// ## Why the allocator is not redirected, though brotli offers to
+//
+// `BrotliEncoderCreateInstance` takes an allocator triple, and several bindings here take that route
+// to put a library's state in storage the program owns — `qoi` does. **It does not work for brotli**,
+// measured rather than assumed: a one-megabyte input at quality 11 makes **63 allocations and 57
+// frees**, peaking at 60 MB against 63 MB requested in total. So the allocator has to be a real one
+// that recycles, not a bump arena, and `BrotliEncoderEstimatePeakMemoryUsage` — which would have let
+// a caller size one — is declared in the public header and **not exported from the shared library**.
+// Hence `requires { heap = true }` and a `Drop` on each state.
+
+module sh.sysl.brotli
+
+import sh.sysl.brotli.c
+import sysl.text.from_cstring
+import sysl.slices.{as_ptr, as_mut_ptr}
+import sysl.buf.{Buf, buf}
+
+// What brotli was told to expect of the input. It changes the model rather than the format, so a
+// stream written in one mode reads back the same in any decoder.
+enum Mode
+    // Nothing is known about the bytes. The right answer for anything binary, and the default.
+    Generic
+
+    // UTF-8 text. Worth choosing for HTML, CSS, JavaScript and JSON, which is most of what a server
+    // compresses.
+    Text
+
+    // The mode WOFF 2.0 uses for font tables.
+    Font
+
+    private[brotli] value(self) -> u32 = self match
+        Generic -> c.MODE_GENERIC
+        Text    -> c.MODE_TEXT
+        Font    -> c.MODE_FONT
+end Mode
+
+// Why a compress or a decompress did not finish.
+enum Error
+    // The output slice cannot hold the answer, and **`needed` is the exact figure** rather than a
+    // ceiling — the work has already been done into brotli's own buffer by the time the shortfall is
+    // known, so there is nothing to estimate. Ask again with a slice this large and it will fit.
+    Short(needed: usize)
+
+    // Decompressing: the answer passed the limit it was given. `limit` is the number that was
+    // passed, not how large the answer would have been — finding that out is exactly what the limit
+    // exists to refuse to do.
+    TooLarge(limit: usize)
+
+    // The input ended in the middle of a stream. More bytes would have continued it, so this is what
+    // a partial download looks like rather than a corrupt one.
+    Truncated
+
+    // The bytes are not a valid brotli stream. `code` and `why` are the library's own, and `why` is
+    // worth logging: brotli distinguishes a bad window size from a bad Huffman table from a
+    // truncated dictionary, and the sentence names which.
+    Corrupt(code: int, why: string)
+
+    // The library refused to allocate its state. On a host this means the process is out of memory.
+    NoMemory
+
+    // `quality` is outside 0..11, or `window` outside 10..24.
+    OutOfRange
+end Error
+
+// How far a single step got. Both counts are of this call, not of the stream.
+struct Progress
+    // Input bytes taken. Less than the slice's length means the output filled first and the rest of
+    // the input has still to be offered.
+    consumed: usize
+
+    // Output bytes written, at the end of what earlier steps wrote.
+    produced: usize
+
+    // Whether the stream is finished. An `Encoder` says so once it has been asked to finish and has
+    // flushed everything; a `Decoder` says so on reaching the end of the compressed data.
+    done: bool
+end Progress
+
+// The largest a compressed stream can be for an input of `len` bytes.
+//
+// Incompressible input is *larger* compressed than raw, because brotli has to frame it — so this is
+// what a slice given to `compress_into` must be for the call to be certain of fitting. It is
+// generous: 100,030 bytes for a 100,000-byte input, where real text lands two orders of magnitude
+// under it. Reach for `compress` unless the answer has to go somewhere already allocated.
+bound(len: usize) -> usize = c.encoder_max_compressed_size(len)
+
+// The quality range brotli accepts, and what it means to move within it.
+//
+// **0 to 11, default 11.** The scale is not linear in either direction: 0 to 4 are fast enough to
+// compress a response on the way out, 5 is the usual on-the-fly choice, and 9 to 11 are for
+// something compressed once and served many times. 11 on a megabyte of text costs about half a
+// second and 60 MB of working memory, which is why it is not what a request handler should pick.
+const MIN_QUALITY: int = c.MIN_QUALITY
+const MAX_QUALITY: int = c.MAX_QUALITY
+const DEFAULT_QUALITY: int = c.DEFAULT_QUALITY
+
+// The window range, in bits. `22` — four megabytes — is the default and is what browsers assume.
+const MIN_WINDOW: int = c.MIN_WINDOW_BITS
+const MAX_WINDOW: int = c.MAX_WINDOW_BITS
+const DEFAULT_WINDOW: int = c.DEFAULT_WINDOW
+
+// ## Encoding
+
+// A brotli encoder. Free it by letting it go out of scope; there is no close.
+struct Encoder
+    private state: *c.EncoderState
+
+    // Where in the destination the next output goes, so a caller feeding several chunks does not
+    // have to track it.
+    written: usize
+
+    // Take another chunk of input, writing into `dst` after everything written so far.
+    //
+    // `dst` must be the **same slice** on every call — the encoder writes at a growing offset into
+    // it, and `written` is that offset. Pass `finish` on the last chunk, or on the only one; until
+    // then the encoder is entitled to hold everything back, and `produced` is routinely zero for a
+    // chunk that has not yet filled a block.
+    //
+    // A `Progress` whose `consumed` is short of `src.len` means `dst` filled up. That is not an
+    // error — a caller draining into a larger buffer would carry on — but for a one-shot into a
+    // fixed slice it is, which is what `compress_into` turns into `Short`.
+    push(*self, src: []const u8, dst: []u8, finish: bool) -> Result[Progress, Error]
+        var available_in: usize = src.len
+        var next_in: *u8 = as_ptr(src)
+        var available_out: usize = dst.len - self.written
+        var next_out: *u8 = as_mut_ptr(dst[self.written..])
+        var total_out: usize = 0
+
+        val op = if finish then c.OPERATION_FINISH else c.OPERATION_PROCESS
+
+        if c.encoder_compress_stream(self.state, op, &available_in, &next_in,
+                                     &available_out, &next_out, &total_out) == 0
+            return Err(Corrupt(0, "the encoder refused the stream"))
+
+        val produced = dst.len - self.written - available_out
+
+        self.written += produced
+
+        Ok(Progress(src.len - available_in, produced, c.encoder_is_finished(self.state) != 0))
+    end push
+end Encoder
+
+impl Drop for Encoder
+    drop(self) = c.encoder_destroy(self.state)
+
+// A new encoder at `quality`, `window` and `mode`.
+encoder(quality: int = DEFAULT_QUALITY, window: int = DEFAULT_WINDOW,
+        mode: Mode = Mode.Generic) -> Result[Encoder, Error]
+    if quality < MIN_QUALITY || quality > MAX_QUALITY then return Err(OutOfRange)
+    if window < MIN_WINDOW || window > MAX_WINDOW then return Err(OutOfRange)
+
+    val state = c.encoder_create(null, null, null)
+
+    if usize(state) == 0 then return Err(NoMemory)
+
+    var e = Encoder(state, 0)
+
+    c.encoder_set_parameter(state, c.PARAM_QUALITY, u32(quality))
+    c.encoder_set_parameter(state, c.PARAM_LGWIN, u32(window))
+    c.encoder_set_parameter(state, c.PARAM_MODE, mode.value())
+
+    Ok(e)
+end encoder
+
+// Compress `src`, answering a buffer that holds exactly the result.
+//
+// **Nothing has to be sized**, because brotli accumulates into its own buffer when it is offered no
+// output space and hands that buffer over — so this asks for none and copies what comes back. That
+// is the form to reach for; `compress_into` is for a destination that already exists.
+compress(src: []const u8, quality: int = DEFAULT_QUALITY, window: int = DEFAULT_WINDOW,
+         mode: Mode = Mode.Generic) -> Result[Buf[u8], Error]
+    var e = encoder(quality, window, mode)?
+
+    var out: Buf[u8] = buf()
+
+    var available_in: usize = src.len
+    var next_in: *u8 = as_ptr(src)
+    var available_out: usize = 0
+    var next_out: *u8 = null
+    var total_out: usize = 0
+
+    // **`available_out` stays zero for the whole loop**, which is what makes the encoder accumulate
+    // rather than write. `size_hint` lets it choose a block layout for a length it already knows.
+    c.encoder_set_parameter(e.state, c.PARAM_SIZE_HINT, u32(if src.len > 0xffffffff then 0 else src.len))
+
+    while c.encoder_is_finished(e.state) == 0
+        if c.encoder_compress_stream(e.state, c.OPERATION_FINISH, &available_in, &next_in,
+                                     &available_out, &next_out, &total_out) == 0
+            return Err(Corrupt(0, "the encoder refused the stream"))
+
+        drain(e.state, &out)
+
+    Ok(out)
+end compress
+
+// Move everything the encoder is holding into `out`. Brotli's buffer is valid only until the next
+// call on the state, which is why this copies rather than handing a slice back.
+private drain(state: *c.EncoderState, out: *Buf[u8])
+    while c.encoder_has_more_output(state) != 0
+        var n: usize = 0
+        val p = c.encoder_take_output(state, &n)
+        out.extend(p[0..<n])
+
+// Compress `src` into `dst` in one call, answering how many bytes were written.
+//
+// `dst` need not be `bound(src.len)` — a smaller slice is worth trying whenever the data is expected
+// to compress, since **`Short` carries the exact size wanted** rather than the bound. The work is
+// done into brotli's own buffer either way, so a second call with the right slice repeats the
+// compression and nothing else.
+compress_into(src: []const u8, dst: []u8, quality: int = DEFAULT_QUALITY,
+              window: int = DEFAULT_WINDOW, mode: Mode = Mode.Generic) -> Result[usize, Error]
+    val out = compress(src, quality, window, mode)?
+
+    if out.len() > dst.len then return Err(Short(out.len()))
+
+    for i in 0..<out.len() do dst[i] = out.at(i)
+
+    Ok(out.len())
+end compress_into
+
+// ## Decoding
+
+// A brotli decoder. Free it by letting it go out of scope; there is no close.
+struct Decoder
+    private state: *c.DecoderState
+
+    // How much of the destination has been filled.
+    written: usize
+
+    // Whether the end of the stream has been reached.
+    done: bool
+
+    // Take another chunk of input, writing into `dst` after everything written so far.
+    //
+    // `dst` must be the **same slice** on every call. `more` says whether further input exists: pass
+    // it on every chunk but the last, so that an input which simply stops can be told from one that
+    // is corrupt. A `Progress` whose `consumed` is short of `src.len` means `dst` filled up, and the
+    // remaining input must be offered again after the destination is drained.
+    push(*self, src: []const u8, dst: []u8, more: bool) -> Result[Progress, Error]
+        var available_in: usize = src.len
+        var next_in: *u8 = as_ptr(src)
+        var available_out: usize = dst.len - self.written
+        var next_out: *u8 = as_mut_ptr(dst[self.written..])
+        var total_out: usize = 0
+
+        val result = c.decoder_decompress_stream(self.state, &available_in, &next_in,
+                                                 &available_out, &next_out, &total_out)
+
+        if result == c.DECODER_RESULT_ERROR then return Err(fault(self.state))
+
+        if result == c.DECODER_RESULT_NEEDS_MORE_INPUT && !more then return Err(Truncated)
+
+        val produced = dst.len - self.written - available_out
+
+        self.written += produced
+        self.done = result == c.DECODER_RESULT_SUCCESS
+
+        Ok(Progress(src.len - available_in, produced, self.done))
+    end push
+end Decoder
+
+impl Drop for Decoder
+    drop(self) = c.decoder_destroy(self.state)
+
+// A new decoder.
+decoder() -> Result[Decoder, Error]
+    val state = c.decoder_create(null, null, null)
+
+    if usize(state) == 0 then return Err(NoMemory)
+
+    Ok(Decoder(state, 0, false))
+end decoder
+
+// Read the decoder's own account of what went wrong. The string is brotli's, static, and outlives
+// the state it came from.
+private fault(state: *c.DecoderState) -> Error
+    val code = c.decoder_get_error_code(state)
+
+    // brotli's messages are ASCII by construction, so the decode cannot fail; a name is still
+    // better than an unwrap that would abort a server on the one path it is meant to survive.
+    Corrupt(code, from_cstring(c.decoder_error_string(code)).unwrap_or("unreadable"))
+
+// Decompress `src`, answering a buffer that holds exactly the result — but never more than `limit`
+// bytes.
+//
+// **`limit` is required and is the whole safety story.** A brotli stream carries no length, and a
+// crafted one of a few hundred bytes expands without bound, so a server decompressing a request body
+// must say how large an answer it is prepared to hold. Passing something enormous is a decision a
+// reader can see; there is no form that omits it.
+decompress(src: []const u8, limit: usize) -> Result[Buf[u8], Error]
+    var d = decoder()?
+
+    var out: Buf[u8] = buf()
+
+    var available_in: usize = src.len
+    var next_in: *u8 = as_ptr(src)
+    var available_out: usize = 0
+    var next_out: *u8 = null
+    var total_out: usize = 0
+
+    loop
+        val result = c.decoder_decompress_stream(d.state, &available_in, &next_in,
+                                                 &available_out, &next_out, &total_out)
+
+        if result == c.DECODER_RESULT_ERROR then return Err(fault(d.state))
+
+        while c.decoder_has_more_output(d.state) != 0
+            var n: usize = 0
+            val p = c.decoder_take_output(d.state, &n)
+
+            if out.len() + n > limit then return Err(TooLarge(limit))
+
+            out.extend(p[0..<n])
+
+        if result == c.DECODER_RESULT_SUCCESS then break
+
+        if result == c.DECODER_RESULT_NEEDS_MORE_INPUT then return Err(Truncated)
+
+    Ok(out)
+end decompress
+
+// Decompress `src` into `dst`, answering how many bytes were written.
+//
+// **`dst`'s length is the limit**, so there is no separate bound to pass. An answer that does not fit
+// is `Short` carrying the exact size wanted — which means the whole stream was decompressed to find
+// out, so this is not the call for input that cannot be trusted. Use `decompress` with a limit for
+// that.
+decompress_into(src: []const u8, dst: []u8) -> Result[usize, Error]
+    var d = decoder()?
+
+    val step = d.push(src, dst, false)?
+
+    if step.done && step.consumed == src.len then return Ok(d.written)
+
+    // It did not finish in the slice given. Find out what it actually wanted, which costs a second
+    // decompression and is only reached on the path that was going to fail anyway.
+    val whole = decompress(src, 0xffffffff)?
+
+    Err(Short(whole.len()))
+end decompress_into
+
+// ## What is linked
+//
+// The version of each library actually loaded, as brotli reports it: major in bits 24 and up, minor
+// in bits 12 to 23, patch in the low twelve. Worth printing in a diagnostic — a stream that one
+// machine reads and another does not is nearly always two builds apart.
+encoder_version() -> u32 = c.encoder_version()
+
+decoder_version() -> u32 = c.decoder_version()

@@ -1,0 +1,48 @@
+// Brotli — `Content-Encoding: br`, at both ends.
+//
+// This is the block a consumer writes to reach this package:
+//
+//     dependencies {
+//       brotli { git = "github.com/sysl-lang/brotli", version = "0.1.0" }
+//     }
+//
+// The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
+// tag `v0.1.0` on this repository.
+//
+// **Brotli has to be installed, and so do its headers.** Nothing is vendored: brotli is a C project
+// with its own build system and a 120 KB static dictionary, and every platform ships it.
+//
+//     brew install brotli             # macOS
+//     sudo apt install libbrotli-dev  # Debian / Ubuntu
+//     sudo pacman -S brotli           # Arch
+//
+// **The build needs no flags**, because brotli installs `libbrotlienc.pc` and `libbrotlidec.pc`
+// beside itself and the `pkg_config` requirements below ask the machine where they are.
+
+package {
+  name    = "brotli"
+  version = "0.1.0"
+
+  // The compiler this was written against and the only one it is known to build with. Lower it when
+  // somebody builds this with an older one — a floor is meant to be a fact rather than a guess.
+  sysl = "0.0.90"
+}
+
+// **`heap`, and there is no way around it.** Both state machines are allocated by the library, and
+// the encoder allocates and frees repeatedly *during* a compression — 63 allocations against 57
+// frees for a one-megabyte input at quality 11, peaking at 60 MB. There is no caller-supplied-slice
+// shape to be had, which is the one real difference from `miniz`.
+//
+// **No `posix`**: nothing here opens a file, reads a clock or touches a socket. Compression is
+// arithmetic over two buffers.
+requires {
+  heap = true
+
+  // **Both, and neither is the other's private dependency.** `libbrotlicommon` is named by both `.pc`
+  // files as `Requires.private`, which covers a static link; a program that only decompresses still
+  // links only what it names here.
+  pkg_config {
+    libbrotlienc = "Brotli's encoder — `brew install brotli` on macOS, Debian's libbrotli-dev, Arch's brotli"
+    libbrotlidec = "Brotli's decoder — installed by the same package as libbrotlienc"
+  }
+}
