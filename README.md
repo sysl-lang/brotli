@@ -5,6 +5,8 @@ one of them sends `Accept-Encoding: br, gzip` — and on text it is worth roughl
 the same speed class, more at the quality settings a server can afford for something it compresses
 once and serves many times.
 
+*An independent sysl package for Brotli. It is not affiliated with or endorsed by Brotli's authors or trademark holders.*
+
 ```
 dependencies {
   brotli { git = "github.com/sysl-lang/brotli", version = "0.1.1" }
