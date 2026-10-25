@@ -9,7 +9,7 @@ once and serves many times.
 
 ```
 dependencies {
-  brotli { git = "github.com/sysl-lang/brotli", version = "0.1.1" }
+  brotli { git = "github.com/sysl-lang/brotli", version = "0.1.2" }
 }
 ```
 

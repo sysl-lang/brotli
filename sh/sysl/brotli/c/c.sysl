@@ -2,7 +2,7 @@
 // headers hold.
 //
 // **Nothing is vendored.** Brotli is three system libraries — `libbrotlienc`, `libbrotlidec` and the
-// `libbrotlicommon` they share — installed as one package everywhere, and `package.hocon` asks
+// `libbrotlicommon` they share — installed as one package everywhere, and `sysl.hocon` asks
 // `pkg-config` where they are. So there is no `defines` block and no build option to get wrong: the
 // objects are the platform's.
 //
